@@ -5,6 +5,12 @@ drivers.vmtools
 # Main output directory
 Drivers
 
+# Pivoted output directories
+Vista
+Win7
+Win8
+Win10
+
 # ISOs - git clean -dfx will hurt bandwidth...
 *.iso
 

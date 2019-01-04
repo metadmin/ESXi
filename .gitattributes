@@ -2,4 +2,5 @@
 * text=auto
 
 # Shell scripts
+pivot-Drivers text eol=lf
 sync-VMware-Tools text eol=lf

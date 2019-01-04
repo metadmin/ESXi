@@ -1,0 +1,151 @@
+#!/usr/bin/env bash
+# ################################################################################################ #
+# Copyright (c) 2019 MetaStack Solutions Ltd. See distribution terms at the end of this file.      #
+# David Allsopp. 4-Jan-2019                                                                        #
+# ################################################################################################ #
+
+DRV_ROOT=Drivers
+
+if [[ ! -d $DRV_ROOT ]] ; then
+  echo "Drivers not found -- synchronise first" >&2
+  exit 1
+fi
+
+OSes=("Vista" "Win7" "Win8" "Win10")
+
+declare -A KNOWN_OSes
+for os in "${OSes[@]}"
+do
+  KNOWN_OSes[$os]=1
+done
+KNOWN_OSes["Win2K8"]=1
+
+function process () {
+  files=()
+  directories=()
+  has_drivers=0
+  while IFS= read -r entry
+  do
+    entry=${entry#./}
+    if [ -d "$DRV_ROOT/$2/$3/$entry" ] ; then
+      if [ ${KNOWN_OSes[$entry]+_} ] ; then
+        has_drivers=1
+      else
+        directories+=("$entry")
+      fi
+    else
+      files+=("$entry")
+    fi
+  done < <(cd $DRV_ROOT/$2/$3 && find . -mindepth 1 -maxdepth 1)
+  if [ ${#files[@]}${#directories[@]} -gt 0 ] ; then
+    if ((has_drivers)) ; then
+      for os in "${OSes[@]}"
+      do
+        mkdir -p $os/$2/$3
+        if [ -d "$DRV_ROOT/$2/$3/$os" ] ; then
+          src=$os
+          last=$os
+        else
+          src=$last
+        fi
+        if [ ${#files[@]} -eq 0 ] ; then
+          while IFS= read -r entry
+          do
+            entry=${entry#./}
+            ln -sr "$DRV_ROOT/$2/$3/$src/$entry" "$os/$2/$3/$entry"
+          done < <(cd $DRV_ROOT/$2/$3/$src && find . -mindepth 1 -maxdepth 1)
+        else
+          ln -sr "$DRV_ROOT/$2/$3/$src" "$os/$2/$3/$src"
+        fi
+      done
+      for os in "${OSes[@]}"
+      do
+        mkdir -p $os/$2/$3
+        for entry in "${files[@]}"
+        do
+          ln -sr "$DRV_ROOT/$2/$3/$entry" "$os/$2/$3/$entry"
+        done
+      done
+      for entry in "${directories[@]}"
+      do
+        process $1 "$2/$3" "$entry"
+      done
+    else
+      for os in "${OSes[@]}"
+      do
+        if [ ${#directories[@]} -eq 0 ] ; then
+          mkdir -p $os/$2
+          ln -sr "$DRV_ROOT/$2/$3" "$os/$2/$3"
+        else
+          mkdir -p $os/$2/$3
+          for entry in "${files[@]}"
+          do
+            ln -sr "$DRV_ROOT/$2/$3/$entry" "$os/$2/$3/$entry"
+          done
+        fi
+      done
+      if [ ${#directories[@]} -gt 0 ] ; then
+        for entry in "${directories[@]}"
+        do
+          process $1 "$2/$3" "$entry"
+        done
+      fi
+    fi
+  else
+    if ((has_drivers)) ; then
+      last=""
+      for os in "${OSes[@]}"
+      do
+        if [ -d "$DRV_ROOT/$2/$3/$os" ] ; then
+          last=$os
+          mkdir -p $os/$2
+          ln -sr "$DRV_ROOT/$2/$3/$os" "$os/$2/$3"
+        else
+          if [[ -z $last ]] ; then
+            if [[ -d "$DRV_ROOT/$2/$3/Win2K8" ]] ; then
+              last=Win2K8
+            fi
+          fi
+          if [[ -n $last ]] ; then
+            mkdir -p $os/$2
+            ln -sr "$DRV_ROOT/$2/$3/$last" "$os/$2/$3"
+          fi
+        fi
+      done
+    fi
+  fi
+}
+
+for iso in $(cd $DRV_ROOT && find . -mindepth 1 -maxdepth 1 -type d)
+do
+  iso=${iso#./}
+  for arch in $(cd $DRV_ROOT && find $iso -mindepth 1 -maxdepth 1 -type d)
+  do
+    while IFS= read -r driver
+    do
+      process $(basename $arch) "$arch" ${driver#./}
+    done < <(cd $DRV_ROOT/$arch && find . -mindepth 1 -maxdepth 1 -type d)
+  done
+done
+
+# ################################################################################################ #
+# Redistribution and use in source and binary forms, with or without modification, are permitted   #
+# provided that the following conditions are met:                                                  #
+#     1. Redistributions of source code must retain the above copyright notice, this list of       #
+#        conditions and the following disclaimer.                                                  #
+#     2. Redistributions in binary form must reproduce the above copyright notice, this list of    #
+#        conditions and the following disclaimer in the documentation and/or other materials       #
+#        provided with the distribution.                                                           #
+#     3. Neither the name of MetaStack Solutions Ltd. nor the names of its contributors may be     #
+#        used to endorse or promote products derived from this software without specific prior     #
+#        written permission.                                                                       #
+#                                                                                                  #
+# This software is provided by the Copyright Holder 'as is' and any express or implied warranties, #
+# including, but not limited to, the implied warranties of merchantability and fitness for a       #
+# particular purpose are disclaimed. In no event shall the Copyright Holder be liable for any      #
+# direct, indirect, incidental, special, exemplary, or consequential damages (including, but not   #
+# limited to, procurement of substitute goods or services; loss of use, data, or profits; or       #
+# business interruption) however caused and on any theory of liability, whether in contract,       #
+# strict liability, or tort (including negligence or otherwise) arising in any way out of the use  #
+# of this software, even if advised of the possibility of such damage.                             #
+# ################################################################################################ #
