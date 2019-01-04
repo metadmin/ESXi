@@ -1,2 +1,5 @@
 # Default behaviour, for when core.autocrlf isn't set
 * text=auto
+
+# Shell scripts
+sync-VMware-Tools text eol=lf

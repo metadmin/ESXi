@@ -1,2 +1,12 @@
+# Temporary directories created by the script
+drivers.extracted
+drivers.vmtools
+
+# Main output directory
+Drivers
+
+# ISOs - git clean -dfx will hurt bandwidth...
+*.iso
+
 # Editor swap files
 *.sw*

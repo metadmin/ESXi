@@ -1,0 +1,392 @@
+#!/bin/bash
+# ################################################################################################ #
+# Copyright (c) 2018 MetaStack Solutions Ltd. See distribution terms at the end of this file.      #
+# David Allsopp. 20-Dec-2018                                                                       #
+# ################################################################################################ #
+
+NO_CHECK=1   # Disable sha512 checking of already downloaded ISOs
+STRICT_DIR=1 # Attempt exact match of VMware Tools layout (STRICT_DIR=0 is unmaintained)
+CLONE_DIR=0  # cp, don't mv, Drivers from drivers.extracted (debugging, mainly)
+
+ROOT=https://packages.vmware.com/tools/esx
+EXT_ROOT=drivers.extracted
+VMT_ROOT=drivers.vmtools
+DRV_ROOT=Drivers
+
+declare -A ISOS
+isos=()
+# 0. Read the directory listing from $ROOT
+for href in $(curl -Ls $ROOT/ | sed -ne 's/.*HREF="\(6\.[^0][^"]*\)".*/\1/p')
+do
+  href="${href%/}"
+  if [[ -e $href.iso || -L $href.iso ]] ; then
+    echo "Skipping $href"
+    iso=$(readlink "$href.iso")
+  else
+    # 1. Download ISOs
+    for iso in $(curl -Ls $ROOT/$href/windows/ | sed -ne 's/.*HREF="\([^"]*\.iso\)".*/\1/p')
+    do
+      if [ -e $iso ] ; then
+        if ((NO_CHECK)) ; then
+          echo "Skipping download and sha512 check for $href"
+        else
+          echo "Checking existing $iso..."
+          sha_current=$(sha512sum $iso | cut -f1 -d' ')
+          sha=$(curl -Ls $ROOT/$href/windows/$iso | sha512sum | cut -f1 -d' ')
+          if [[ $sha != $sha_current ]] ; then
+            echo "Warning: file $ROOT/$href/windows/$iso already downloaded"
+            echo "URL sha512: $sha"
+            echo "Our sha512: $sha_current"
+          fi
+        fi
+      else
+        echo "Downloading $iso..."
+        curl -Ls -o $iso $ROOT/$href/windows/$iso
+      fi
+      ln -s $iso $href.iso
+    done
+  fi
+  isos+=("${iso%.iso}")
+done
+
+# 2. Extract drivers using 7zip and cabextract
+mkdir -p $EXT_ROOT
+
+for iso in "${isos[@]}"
+do
+  if [ ! -d $EXT_ROOT/$iso ] ; then
+    mkdir -p $EXT_ROOT/$iso
+    cd $EXT_ROOT/$iso
+    7z e -bso0 -bsp0 ../../$iso.iso setup.exe setup64.exe
+    if [ ! -x $EXT_ROOT/$iso/setup.exe ] ; then
+      chmod +x setup.exe setup64.exe
+    fi
+
+    for setup in setup setup64
+    do
+      mkdir extracted-$setup
+      cd extracted-$setup
+      7z e -bso0 -bsp0 ../$setup.exe *.cab
+      cabs=()
+      for cab in *.cab
+      do
+        mkdir ${cab%.cab}
+        cd ${cab%.cab}
+        (cabextract -q ../$cab ; rm ../$cab) &
+        cabs+=("$cab")
+        cd ..
+      done
+      while ls "${cabs[@]}" &>/dev/null
+      do
+        sleep 1
+      done
+      for cab in "${cabs[@]}"
+      do
+        cab=${cab%.cab}
+        if ! ls $cab/*.inf_* &>/dev/null && ! ls $cab/vcbsnapshotprovider* &>/dev/null ; then
+          rm -rf $cab
+        else
+          (touch $cab.cab
+          cd $cab
+          for file in *
+          do
+            deguid=$(echo $file | sed -e 's/\.[0-9A-F]\{8\}_\([0-9A-F]\{4\}_\)\{3\}[0-9A-F]\{12\}$//')
+            if [[ $file != $deguid ]] ; then
+              dir=$(echo $deguid | sed -e 's/.*_\([^_]*\)$/\1/')
+              if [[ -n $dir ]] ; then
+                base=${deguid%_*}
+                mkdir -p "$dir"
+                mv "$file" "$dir/$base"
+              fi
+            fi
+          done
+          cd ..
+          rm $cab.cab) &
+        fi
+      done
+      while ls "${cabs[@]}" &>/dev/null
+      do
+        sleep 1
+      done
+      cd ..
+    done
+    cd ../..
+  fi
+done
+
+# 3. Extract files via setup
+mkdir -p $VMT_ROOT
+
+for iso in "${isos[@]}"
+do
+  # @@DRA Although this launches via setup.exe, the recipe construction below assumes
+  #       64-bit environment. Should either fail here for 32-bit OS, or re-work logic in next phase.
+  while [ ! -d $VMT_ROOT/$iso ]
+  do
+    # @@DRA Not bothered dealing with spaces in TARGETDIR
+    # cygstart seems to be necessary in order to ensure that the double quotes are passed exactly as below
+    echo "$(date) Invoke $EXT_ROOT/$iso/setup.exe"
+    cygstart --wait $EXT_ROOT/$iso/setup.exe "/a /s /v\"/qn TARGETDIR=$(cygpath -aw $VMT_ROOT/$iso)\""
+    EXIT=$?
+    if [ ! -d $VMT_ROOT/$iso ] ; then
+      echo "$(date) Extraction failed?? (cygstart exited with $EXIT)"
+      sleep 1
+    else
+      echo "$(date) Extraction complete"
+    fi
+  done
+done
+
+# 4. Construct the drivers directory for this architecture (64-bit assumed)
+mkdir -p $DRV_ROOT
+
+for iso in "${isos[@]}"
+do
+  if [ ! -d $DRV_ROOT/$iso ] ; then
+    mkdir -p $DRV_ROOT/$iso
+
+    unset REVERTS
+    declare -A REVERTS
+    REVERT_KEYS=()
+
+    # This was fixed in 10.2
+    if [ -d "$VMT_ROOT/$iso/VMware/VMware Tools/Drivers" ] ; then
+      while IFS= read -r stray_dir
+      do
+        stray_dir=${stray_dir#./}
+        if [ -d "$VMT_ROOT/$iso/VMware/VMware Tools/VMware/Drivers/$stray_dir" ] ; then
+          echo "Cannot move $stray_dir from the incorrect driver store - target exists" >&2
+        else
+          mv "$VMT_ROOT/$iso/VMware/VMware Tools/Drivers/$stray_dir" "$VMT_ROOT/$iso/VMware/VMware Tools/VMware/Drivers/"
+          REVERTS["$VMT_ROOT/$iso/VMware/VMware Tools/VMware/Drivers/$stray_dir"]="$VMT_ROOT/$iso/VMware/VMware Tools/Drivers/"
+          REVERT_KEYS+=("$VMT_ROOT/$iso/VMware/VMware Tools/VMware/Drivers/$stray_dir")
+        fi
+      done < <(cd "$VMT_ROOT/$iso/VMware/VMware Tools/Drivers" && find . -mindepth 1 -maxdepth 1 -type d)
+    fi
+
+    if [ ! -d "$EXT_ROOT/$iso/extracted-setup64/VMXNet3" ] ; then
+      mv "$EXT_ROOT/$iso/extracted-setup64/VMXNet" "$EXT_ROOT/$iso/extracted-setup64/VMXNet3"
+      mkdir "$EXT_ROOT/$iso/extracted-setup64/VMXNet"
+      mv "$EXT_ROOT/$iso/extracted-setup64/VMXNet3/Win2K8" "$EXT_ROOT/$iso/extracted-setup64/VMXNet/"
+      REVERTS["$EXT_ROOT/$iso/extracted-setup64/VMXNet/Win2K8"]="$EXT_ROOT/$iso/extracted-setup64/VMXNet3/"
+      REVERT_KEYS+=("$EXT_ROOT/$iso/extracted-setup64/VMXNet/Win2K8")
+      REVERTS["$EXT_ROOT/$iso/extracted-setup64/VMXNet"]=""
+      REVERT_KEYS+=("$EXT_ROOT/$iso/extracted-setup64/VMXNet")
+      REVERTS["$EXT_ROOT/$iso/extracted-setup64/VMXNet3"]="$EXT_ROOT/$iso/extracted-setup64/VMXNet"
+      REVERT_KEYS+=("$EXT_ROOT/$iso/extracted-setup64/VMXNet3")
+    fi
+
+    unset TARGETS
+    unset TARGET_FILES
+    unset TARGET_EXISTS
+    declare -A TARGETS
+    declare -A TARGET_FILES
+    declare -A TARGET_EXISTS
+    TARGET_DIRS=()
+    while IFS= read -r dir
+    do
+      dir=${dir#./}
+      TARGET_DIRS+=("$dir")
+      files=()
+      while IFS= read -r file
+      do
+        file=${file#./}
+        sum=$(sha512sum "$VMT_ROOT/$iso/VMware/VMware Tools/VMware/Drivers/$dir/$file" | cut -f1 -d' ')
+        TARGET_FILES[$dir/$file]=$sum
+        TARGET_EXISTS[$sum]=1
+        files+=($sum)
+      done < <(cd "$VMT_ROOT/$iso/VMware/VMWare Tools/VMware/Drivers/$dir" && find . -type f)
+      sum=$(IFS=$'\n'; echo "${files[*]}" | sort | sha512sum)
+      TARGETS[$dir]=$sum
+    done < <(cd "$VMT_ROOT/$iso/VMware/VMWare Tools/VMware/Drivers" && find . -maxdepth 1 -mindepth 1 -type d)
+
+    unset SOURCES
+    unset SOURCE_FILES
+    unset DIRTY_FILES
+    declare -A SOURCES
+    declare -A SOURCE_FILES
+    declare -A DIRTY_FILES
+    while IFS= read -r dir
+    do
+      dir=${dir#./}
+      files=()
+      dirty=()
+      while IFS= read -r file
+      do
+        file=${file#./}
+        sum=$(sha512sum "$EXT_ROOT/$iso/extracted-setup64/$dir/$file" | cut -f1 -d' ')
+        if [ ${TARGET_EXISTS[$sum]+_} ] ; then
+          if [ ${SOURCE_FILES[$sum]+_} ] ; then
+            eval target=${SOURCE_FILES[$sum]}
+          else
+            target=()
+          fi
+          target+=("$dir/$file")
+          SOURCE_FILES[$sum]="$(printf '( ' ; for i in "${target[@]}" ; do printf '"%s" ' "$i" ; done ; printf ')')"
+          files+=($sum)
+        else
+          if ((CLONE_DIR)) ; then
+            dirty+=($file)
+          else
+            rm "$EXT_ROOT/$iso/extracted-setup64/$dir/$file"
+            PREV=$(dirname "$EXT_ROOT/$iso/extracted-setup64/$dir/$file")
+            if [[ -d $PREV ]] && ! ls "$PREV"/* &>/dev/null ; then
+              rmdir "$PREV"
+            fi
+          fi
+        fi
+      done < <(cd "$EXT_ROOT/$iso/extracted-setup64/$dir" && find . -type f)
+      sum=$(IFS=$'\n'; echo "${files[*]}" | sort | sha512sum)
+      if [ ${SOURCES[$sum]+_} ] ; then
+        echo "Warning - both $dir and ${SOURCES[$sum]} have the same checksum - $dir ignored" >&2
+      else
+        SOURCES[$sum]="$dir"
+        if ((${#dirty[@]})) ; then
+          DIRTY_FILES[$dir]="$(printf '( ' ; for i in "${dirty[@]}" ; do printf '"%s" ' "$i" ; done ; printf ')')"
+        fi
+      fi
+    done < <(cd "$EXT_ROOT/$iso/extracted-setup64" && find . -maxdepth 1 -mindepth 1 -type d)
+
+    if ((CLONE_DIR)) ; then
+      cmd="cp -R"
+    else
+      cmd=mv
+    fi
+    for dir in "${TARGET_DIRS[@]}"
+    do
+      sum=${TARGETS[$dir]}
+      if [ ${SOURCES[$sum]+_} ] ; then
+        COPY_SRC=${SOURCES[$sum]}
+        if ((CLONE_DIR)) ; then
+          SRC=$COPY_SRC
+        else
+          SRC=$dir
+        fi
+        if [[ $STRICT_DIR -eq 1 || ${COPY_SRC,,} != ${dir,,} ]] ; then
+          $cmd $EXT_ROOT/$iso/extracted-setup64/$COPY_SRC $DRV_ROOT/$iso/$dir
+          DST=$dir
+          # RECIP
+        else
+          $cmd $EXT_ROOT/$iso/extracted-setup64/$COPY_SRC $DRV_ROOT/$iso/
+          DST=$SRC
+          # RECIP
+        fi
+        if [ ${DIRTY_FILES[$COPY_SRC]+_} ] ; then
+          eval files=${DIRTY_FILES[$COPY_SRC]}
+          for file in "${files[@]}"
+          do
+            rm "$DRV_ROOT/$iso/$DST/$file"
+            PREV=$(dirname "$DRV_ROOT/$iso/$DST/$file")
+            if [[ -d $PREV ]] && ! ls "$PREV"/* &>/dev/null ; then
+              rmdir "$PREV"
+            fi
+          done
+        fi
+      else
+        SRC=$dir
+        DST=$dir
+      fi
+      while IFS= read -r item
+      do
+        item=${item#./}
+        if [ -f "$EXT_ROOT/$iso/extracted-setup64/$SRC/$item" ] ; then
+          if [ ! ${SOURCES[$sum]+_} ] ; then
+            mkdir -p "$DRV_ROOT/$iso/$dir/$(dirname $item)"
+            $cmd "$EXT_ROOT/$iso/extracted-setup64/$dir/$item" "$DRV_ROOT/$iso/$dir/$item"
+            # RECIP
+          fi
+        else
+          if [ ${SOURCES[$sum]+_} ] ; then
+            # Earlier iteration - the VmVideo driver prefixes all files with _
+            # The sha512 version would do this too.
+            TEST="$(dirname "$item")/_$(basename "$item")"
+            if [ -f "$DRV_ROOT/$iso/$dir/$TEST" ] ; then
+              mv "$DRV_ROOT/$iso/$dir/$TEST" "$DRV_ROOT/$iso/$dir/$item"
+              # RECIP
+            else
+              eval possibles=${SOURCE_FILES[${TARGET_FILES[$dir/$item]}]}
+              i=0
+              for candidate in "${possibles[@]}"
+              do
+                ((i++))
+                candidate=${candidate#*/}
+                if [ -f "$DRV_ROOT/$iso/$dir/$candidate" ] ; then
+                  TARGET="$DRV_ROOT/$iso/$dir/$item"
+                  TARGET_DIR=$(dirname "$TARGET")
+                  if [[ ! -d $TARGET_DIR ]] ; then
+                    mkdir -p "$TARGET_DIR"
+                  fi
+                  if [[ -e $TARGET ]] ; then
+                    TMP=$(mktemp -p $TARGET_DIR)
+                    mv "$DRV_ROOT/$iso/$dir/$candidate" "$TMP"
+                    rm -rf "$TARGET"
+                    mv "$TMP" "$TARGET"
+                    # RECIP
+                  else
+                    mv "$DRV_ROOT/$iso/$dir/$candidate" "$TARGET"
+                    # RECIP
+                  fi
+                  PREV=$(dirname "$DRV_ROOT/$iso/$dir/$candidate")
+                  if [[ -d $PREV ]] && ! ls "$PREV"/* &>/dev/null ; then
+                    rmdir "$PREV"
+                  fi
+                  possibles=("${possibles[@]:0:i-1}" "${possibles[@]:i}")
+                  SOURCE_FILES[${TARGET_FILES[$dir/$item]}]="$(printf '( ' ; for i in "${possibles[@]}" ; do printf '"%s" ' "$i" ; done ; printf ')')"
+                  i=0
+                  break
+                fi
+              done
+              if ((i)) ; then
+                # This should be un-reachable, since all the files should have existed
+                # in order for the checksums to match.
+                echo "Assertion failure - directory changed during run? For $dir/$item trying ${SOURCE_FILES[${TARGET_FILES[$dir/$item]}]}"
+              fi
+            fi
+          else
+            # @@DRA This is left as an assertion failure, though clearly logic could be added were it needed...
+            echo "Can't find $item in $dir"
+          fi
+        fi
+      done < <(cd "$VMT_ROOT/$iso/VMware/VMware Tools/VMware/Drivers/$dir" && find . -type f)
+    done
+
+    if ((CLONE_DIR)) ; then
+      for revert in "${REVERT_KEYS[@]}"
+      do
+        TARGET=${REVERTS[$revert]}
+        if [[ -z $TARGET ]] ; then
+          rmdir "$revert"
+        else
+          mv "$revert" "$TARGET"
+        fi
+      done
+    fi
+  fi
+done
+
+if ((!CLONE_DIR)) ; then
+  rm -rf $EXT_ROOT
+  rm -rf $VMT_ROOT
+fi
+
+# ################################################################################################ #
+# Redistribution and use in source and binary forms, with or without modification, are permitted   #
+# provided that the following conditions are met:                                                  #
+#     1. Redistributions of source code must retain the above copyright notice, this list of       #
+#        conditions and the following disclaimer.                                                  #
+#     2. Redistributions in binary form must reproduce the above copyright notice, this list of    #
+#        conditions and the following disclaimer in the documentation and/or other materials       #
+#        provided with the distribution.                                                           #
+#     3. Neither the name of MetaStack Solutions Ltd. nor the names of its contributors may be     #
+#        used to endorse or promote products derived from this software without specific prior     #
+#        written permission.                                                                       #
+#                                                                                                  #
+# This software is provided by the Copyright Holder 'as is' and any express or implied warranties, #
+# including, but not limited to, the implied warranties of merchantability and fitness for a       #
+# particular purpose are disclaimed. In no event shall the Copyright Holder be liable for any      #
+# direct, indirect, incidental, special, exemplary, or consequential damages (including, but not   #
+# limited to, procurement of substitute goods or services; loss of use, data, or profits; or       #
+# business interruption) however caused and on any theory of liability, whether in contract,       #
+# strict liability, or tort (including negligence or otherwise) arising in any way out of the use  #
+# of this software, even if advised of the possibility of such damage.                             #
+# ################################################################################################ #
