@@ -25,6 +25,17 @@ function push_item () {
   TABLE["$2"]="$(printf '( ' ; for i in "${array[@]}" ; do printf '"%s" ' "$i" ; done ; printf ')')"
 }
 
+function rmdir_if_empty () {
+  if [[ -d $1 ]] && ! ls "$1"/* &>/dev/null ; then
+    rmdir "$1"
+  fi
+}
+
+function rm_and_rmdir () {
+  rm "$1"
+  rmdir_if_empty "$(dirname "$1")"
+}
+
 declare -A ISOS
 isos=()
 # 0. Read the directory listing from $ROOT
@@ -233,11 +244,7 @@ do
           if ((CLONE_DIR)) ; then
             push_item DIRTY_FILES "$dir" "$file"
           else
-            rm "$EXT_ROOT/$iso/extracted-setup64/$dir/$file"
-            PREV=$(dirname "$EXT_ROOT/$iso/extracted-setup64/$dir/$file")
-            if [[ -d $PREV ]] && ! ls "$PREV"/* &>/dev/null ; then
-              rmdir "$PREV"
-            fi
+            rm_and_rmdir "$EXT_ROOT/$iso/extracted-setup64/$dir/$file"
           fi
         fi
       done < <(cd "$EXT_ROOT/$iso/extracted-setup64/$dir" && find . -type f)
@@ -278,11 +285,7 @@ do
           eval files=${DIRTY_FILES[$COPY_SRC]}
           for file in "${files[@]}"
           do
-            rm "$DRV_ROOT/$iso/$DST/$file"
-            PREV=$(dirname "$DRV_ROOT/$iso/$DST/$file")
-            if [[ -d $PREV ]] && ! ls "$PREV"/* &>/dev/null ; then
-              rmdir "$PREV"
-            fi
+            rm_and_rmdir "$DRV_ROOT/$iso/$DST/$file"
           done
         fi
       else
@@ -329,10 +332,7 @@ do
                     mv "$DRV_ROOT/$iso/$dir/$candidate" "$TARGET"
                     # RECIP
                   fi
-                  PREV=$(dirname "$DRV_ROOT/$iso/$dir/$candidate")
-                  if [[ -d $PREV ]] && ! ls "$PREV"/* &>/dev/null ; then
-                    rmdir "$PREV"
-                  fi
+                  rmdir_if_empty "$(dirname "$DRV_ROOT/$iso/$dir/$candidate")"
                   possibles=("${possibles[@]:0:i-1}" "${possibles[@]:i}")
                   SOURCE_FILES[${TARGET_FILES[$dir/$item]}]="$(printf '( ' ; for i in "${possibles[@]}" ; do printf '"%s" ' "$i" ; done ; printf ')')"
                   i=0
