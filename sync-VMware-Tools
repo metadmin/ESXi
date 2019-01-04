@@ -36,6 +36,12 @@ function rm_and_rmdir () {
   rmdir_if_empty "$(dirname "$1")"
 }
 
+function mv_x86 () {
+  if [[ -f $1 ]] ; then
+    mv "$1" "$2"
+  fi
+}
+
 declare -A ISOS
 isos=()
 # 0. Read the directory listing from $ROOT
@@ -160,13 +166,14 @@ do
   done
 done
 
-# 4. Construct the drivers directory for this architecture (64-bit assumed)
+# 4. Construct the drivers directory (64-bit assumed to be native architecture)
 mkdir -p $DRV_ROOT
 
 for iso in "${isos[@]}"
 do
   if [ ! -d $DRV_ROOT/$iso ] ; then
-    mkdir -p $DRV_ROOT/$iso
+    mkdir -p $DRV_ROOT/$iso/x64
+    mkdir -p $DRV_ROOT/$iso/x86
 
     unset REVERTS
     declare -A REVERTS
@@ -187,17 +194,21 @@ do
       done < <(cd "$VMT_ROOT/$iso/VMware/VMware Tools/Drivers" && find . -mindepth 1 -maxdepth 1 -type d)
     fi
 
-    if [ ! -d "$EXT_ROOT/$iso/extracted-setup64/VMXNet3" ] ; then
-      mv "$EXT_ROOT/$iso/extracted-setup64/VMXNet" "$EXT_ROOT/$iso/extracted-setup64/VMXNet3"
-      mkdir "$EXT_ROOT/$iso/extracted-setup64/VMXNet"
-      mv "$EXT_ROOT/$iso/extracted-setup64/VMXNet3/Win2K8" "$EXT_ROOT/$iso/extracted-setup64/VMXNet/"
-      REVERTS["$EXT_ROOT/$iso/extracted-setup64/VMXNet/Win2K8"]="$EXT_ROOT/$iso/extracted-setup64/VMXNet3/"
-      REVERT_KEYS+=("$EXT_ROOT/$iso/extracted-setup64/VMXNet/Win2K8")
-      REVERTS["$EXT_ROOT/$iso/extracted-setup64/VMXNet"]=""
-      REVERT_KEYS+=("$EXT_ROOT/$iso/extracted-setup64/VMXNet")
-      REVERTS["$EXT_ROOT/$iso/extracted-setup64/VMXNet3"]="$EXT_ROOT/$iso/extracted-setup64/VMXNet"
-      REVERT_KEYS+=("$EXT_ROOT/$iso/extracted-setup64/VMXNet3")
-    fi
+    arch=("" "64")
+    for arch in "${arch[@]}"
+    do
+      if [ ! -d "$EXT_ROOT/$iso/extracted-setup$arch/VMXNet3" ] ; then
+        mv "$EXT_ROOT/$iso/extracted-setup$arch/VMXNet" "$EXT_ROOT/$iso/extracted-setup$arch/VMXNet3"
+        mkdir "$EXT_ROOT/$iso/extracted-setup$arch/VMXNet"
+        mv "$EXT_ROOT/$iso/extracted-setup$arch/VMXNet3/Win2K8" "$EXT_ROOT/$iso/extracted-setup$arch/VMXNet/"
+        REVERTS["$EXT_ROOT/$iso/extracted-setup$arch/VMXNet/Win2K8"]="$EXT_ROOT/$iso/extracted-setup$arch/VMXNet3/"
+        REVERT_KEYS+=("$EXT_ROOT/$iso/extracted-setup$arch/VMXNet/Win2K8")
+        REVERTS["$EXT_ROOT/$iso/extracted-setup$arch/VMXNet"]=""
+        REVERT_KEYS+=("$EXT_ROOT/$iso/extracted-setup$arch/VMXNet")
+        REVERTS["$EXT_ROOT/$iso/extracted-setup$arch/VMXNet3"]="$EXT_ROOT/$iso/extracted-setup$arch/VMXNet"
+        REVERT_KEYS+=("$EXT_ROOT/$iso/extracted-setup$arch/VMXNet3")
+      fi
+    done
 
     unset TARGETS
     unset TARGET_FILES
@@ -245,6 +256,9 @@ do
             push_item DIRTY_FILES "$dir" "$file"
           else
             rm_and_rmdir "$EXT_ROOT/$iso/extracted-setup64/$dir/$file"
+            if [ -f "$EXT_ROOT/$iso/extracted-setup/$dir/$file" ] ; then
+              rm_and_rmdir "$EXT_ROOT/$iso/extracted-setup/$dir/$file"
+            fi
           fi
         fi
       done < <(cd "$EXT_ROOT/$iso/extracted-setup64/$dir" && find . -type f)
@@ -273,19 +287,24 @@ do
           SRC=$dir
         fi
         if [[ $STRICT_DIR -eq 1 || ${COPY_SRC,,} != ${dir,,} ]] ; then
-          $cmd $EXT_ROOT/$iso/extracted-setup64/$COPY_SRC $DRV_ROOT/$iso/$dir
           DST=$dir
-          # RECIP
+          TARGET=$dir
         else
-          $cmd $EXT_ROOT/$iso/extracted-setup64/$COPY_SRC $DRV_ROOT/$iso/
           DST=$SRC
-          # RECIP
+          TARGET=""
+        fi
+        $cmd $EXT_ROOT/$iso/extracted-setup64/$COPY_SRC $DRV_ROOT/$iso/x64/$TARGET
+        if [ -d "$EXT_ROOT/$iso/extracted-setup/$COPY_SRC" ] ; then
+          $cmd $EXT_ROOT/$iso/extracted-setup/$COPY_SRC $DRV_ROOT/$iso/x86/$TARGET
         fi
         if [ ${DIRTY_FILES[$COPY_SRC]+_} ] ; then
           eval files=${DIRTY_FILES[$COPY_SRC]}
           for file in "${files[@]}"
           do
-            rm_and_rmdir "$DRV_ROOT/$iso/$DST/$file"
+            rm_and_rmdir "$DRV_ROOT/$iso/x64/$DST/$file"
+            if [ -d "$EXT_ROOT/$iso/extracted-setup/$COPY_SRC" ] ; then
+              rm_and_rmdir "$DRV_ROOT/$iso/x86/$DST/$file"
+            fi
           done
         fi
       else
@@ -297,18 +316,19 @@ do
         item=${item#./}
         if [ -f "$EXT_ROOT/$iso/extracted-setup64/$SRC/$item" ] ; then
           if [ ! ${SOURCES[$sum]+_} ] ; then
-            mkdir -p "$DRV_ROOT/$iso/$dir/$(dirname $item)"
-            $cmd "$EXT_ROOT/$iso/extracted-setup64/$dir/$item" "$DRV_ROOT/$iso/$dir/$item"
-            # RECIP
+            mkdir -p "$DRV_ROOT/$iso/x64/$dir/$(dirname $item)"
+            mkdir -p "$DRV_ROOT/$iso/x86/$dir/$(dirname $item)"
+            $cmd "$EXT_ROOT/$iso/extracted-setup64/$dir/$item" "$DRV_ROOT/$iso/x64/$dir/$item"
+            $cmd "$EXT_ROOT/$iso/extracted-setup/$dir/$item" "$DRV_ROOT/$iso/x86/$dir/$item"
           fi
         else
           if [ ${SOURCES[$sum]+_} ] ; then
             # Earlier iteration - the VmVideo driver prefixes all files with _
             # The sha512 version would do this too.
             TEST="$(dirname "$item")/_$(basename "$item")"
-            if [ -f "$DRV_ROOT/$iso/$dir/$TEST" ] ; then
-              mv "$DRV_ROOT/$iso/$dir/$TEST" "$DRV_ROOT/$iso/$dir/$item"
-              # RECIP
+            if [ -f "$DRV_ROOT/$iso/x64/$dir/$TEST" ] ; then
+              mv "$DRV_ROOT/$iso/x64/$dir/$TEST" "$DRV_ROOT/$iso/x64/$dir/$item"
+              mv_x86 "$DRV_ROOT/$iso/x86/$dir/$TEST" "$DRV_ROOT/$iso/x86/$dir/$item"
             else
               eval possibles=${SOURCE_FILES[${TARGET_FILES[$dir/$item]}]}
               i=0
@@ -316,23 +336,29 @@ do
               do
                 ((i++))
                 candidate=${candidate#*/}
-                if [ -f "$DRV_ROOT/$iso/$dir/$candidate" ] ; then
-                  TARGET="$DRV_ROOT/$iso/$dir/$item"
+                if [ -f "$DRV_ROOT/$iso/x64/$dir/$candidate" ] ; then
+                  TARGET="$dir/$item"
                   TARGET_DIR=$(dirname "$TARGET")
-                  if [[ ! -d $TARGET_DIR ]] ; then
-                    mkdir -p "$TARGET_DIR"
+                  if [[ ! -d "$DRV_ROOT/$iso/x64/$TARGET_DIR" ]] ; then
+                    mkdir -p "$DRV_ROOT/$iso/x64/$TARGET_DIR"
+                    mkdir -p "$DRV_ROOT/$iso/x86/$TARGET_DIR"
                   fi
-                  if [[ -e $TARGET ]] ; then
-                    TMP=$(mktemp -p $TARGET_DIR)
-                    mv "$DRV_ROOT/$iso/$dir/$candidate" "$TMP"
-                    rm -rf "$TARGET"
-                    mv "$TMP" "$TARGET"
-                    # RECIP
+                  if [[ -e "$DRV_ROOT/$iso/x64/$TARGET" ]] ; then
+                    TMP=$(mktemp -p "$DRV_ROOT/$iso/x64/$TARGET_DIR")
+                    mv "$DRV_ROOT/$iso/x64/$dir/$candidate" "$TMP"
+                    rm -rf "$DRV_ROOT/$iso/x64/$TARGET"
+                    mv "$TMP" "$DRV_ROOT/$iso/x64/$TARGET"
+                    if [[ -e "$DRV_ROOT/$iso/x86/$TARGET" ]] ; then
+                      mv "$DRV_ROOT/$iso/x86/$dir/$candidate" "$TMP"
+                      rm -rf "$DRV_ROOT/$iso/x86/$TARGET"
+                      mv "$TMP" "$DRV_ROOT/$iso/x86/$TARGET"
+                    fi
                   else
-                    mv "$DRV_ROOT/$iso/$dir/$candidate" "$TARGET"
-                    # RECIP
+                    mv "$DRV_ROOT/$iso/x64/$dir/$candidate" "$DRV_ROOT/$iso/x64/$TARGET"
+                    mv_x86 "$DRV_ROOT/$iso/x86/$dir/$candidate" "$DRV_ROOT/$iso/x86/$TARGET"
                   fi
-                  rmdir_if_empty "$(dirname "$DRV_ROOT/$iso/$dir/$candidate")"
+                  rmdir_if_empty "$(dirname "$DRV_ROOT/$iso/x64/$dir/$candidate")"
+                  rmdir_if_empty "$(dirname "$DRV_ROOT/$iso/x86/$dir/$candidate")"
                   possibles=("${possibles[@]:0:i-1}" "${possibles[@]:i}")
                   SOURCE_FILES[${TARGET_FILES[$dir/$item]}]="$(printf '( ' ; for i in "${possibles[@]}" ; do printf '"%s" ' "$i" ; done ; printf ')')"
                   i=0
@@ -352,6 +378,10 @@ do
         fi
       done < <(cd "$VMT_ROOT/$iso/VMware/VMware Tools/VMware/Drivers/$dir" && find . -type f)
     done
+    while read -r wrong right
+    do
+      mv $wrong $right
+    done < <(grep CatalogFile $(find $DRV_ROOT/$iso -name '*.inf' -type f) | tr -d '\r' | grep -v "/\([^/]*\)\.inf:.*\1\.cat" | sed -e 's|\(.*/\)\([^/]*\)\.inf:.* = \(.*\)\.cat|\1\2.inf \1\3.inf\n\1\2.cat \1\3.cat|')
 
     if ((CLONE_DIR)) ; then
       for revert in "${REVERT_KEYS[@]}"
