@@ -13,6 +13,18 @@ EXT_ROOT=drivers.extracted
 VMT_ROOT=drivers.vmtools
 DRV_ROOT=Drivers
 
+function push_item () {
+  local -n TABLE=$1
+  if [ ${TABLE["$2"]+_} ] ; then
+    eval array=${TABLE["$2"]}
+    array+=("$3")
+  else
+    array=("$3")
+  fi
+  # Should be able to factorise the subcommand and eliminate the duplication for possibles/SOURCE_FILES later
+  TABLE["$2"]="$(printf '( ' ; for i in "${array[@]}" ; do printf '"%s" ' "$i" ; done ; printf ')')"
+}
+
 declare -A ISOS
 isos=()
 # 0. Read the directory listing from $ROOT
@@ -210,23 +222,16 @@ do
     do
       dir=${dir#./}
       files=()
-      dirty=()
       while IFS= read -r file
       do
         file=${file#./}
         sum=$(sha512sum "$EXT_ROOT/$iso/extracted-setup64/$dir/$file" | cut -f1 -d' ')
         if [ ${TARGET_EXISTS[$sum]+_} ] ; then
-          if [ ${SOURCE_FILES[$sum]+_} ] ; then
-            eval target=${SOURCE_FILES[$sum]}
-          else
-            target=()
-          fi
-          target+=("$dir/$file")
-          SOURCE_FILES[$sum]="$(printf '( ' ; for i in "${target[@]}" ; do printf '"%s" ' "$i" ; done ; printf ')')"
+          push_item SOURCE_FILES "$sum" "$dir/$file"
           files+=($sum)
         else
           if ((CLONE_DIR)) ; then
-            dirty+=($file)
+            push_item DIRTY_FILES "$dir" "$file"
           else
             rm "$EXT_ROOT/$iso/extracted-setup64/$dir/$file"
             PREV=$(dirname "$EXT_ROOT/$iso/extracted-setup64/$dir/$file")
@@ -239,11 +244,9 @@ do
       sum=$(IFS=$'\n'; echo "${files[*]}" | sort | sha512sum)
       if [ ${SOURCES[$sum]+_} ] ; then
         echo "Warning - both $dir and ${SOURCES[$sum]} have the same checksum - $dir ignored" >&2
+        unset DIRTY_FILES["$dir"]
       else
         SOURCES[$sum]="$dir"
-        if ((${#dirty[@]})) ; then
-          DIRTY_FILES[$dir]="$(printf '( ' ; for i in "${dirty[@]}" ; do printf '"%s" ' "$i" ; done ; printf ')')"
-        fi
       fi
     done < <(cd "$EXT_ROOT/$iso/extracted-setup64" && find . -maxdepth 1 -mindepth 1 -type d)
 
