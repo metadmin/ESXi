@@ -47,6 +47,22 @@ function mv_x86 () {
   fi
 }
 
+function wait_for_cabs () {
+  loop=1
+  while ((loop))
+  do
+    loop=0
+    for cab in "${cabs[@]}"
+    do
+      if [[ -f $cab ]] ; then
+        sleep 1
+        loop=1
+        break
+      fi
+    done
+  done
+}
+
 declare -A ISOS
 isos=()
 # 0. Read the directory listing from $ROOT
@@ -110,10 +126,7 @@ do
         cabs+=("$cab")
         cd ..
       done
-      while ls "${cabs[@]}" &>/dev/null
-      do
-        sleep 1
-      done
+      wait_for_cabs
       for cab in "${cabs[@]}"
       do
         cab=${cab%.cab}
@@ -138,10 +151,7 @@ do
           rm $cab.cab) &
         fi
       done
-      while ls "${cabs[@]}" &>/dev/null
-      do
-        sleep 1
-      done
+      wait_for_cabs
       cd ..
     done
     cd ../..
