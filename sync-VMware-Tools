@@ -4,6 +4,11 @@
 # David Allsopp. 20-Dec-2018                                                                       #
 # ################################################################################################ #
 
+# Cygwin packages required:
+#   - curl
+#   - p7zip
+#   - cabextract
+
 NO_CHECK=1   # Disable sha512 checking of already downloaded ISOs
 STRICT_DIR=1 # Attempt exact match of VMware Tools layout (STRICT_DIR=0 is unmaintained)
 CLONE_DIR=0  # cp, don't mv, Drivers from drivers.extracted (debugging, mainly)
